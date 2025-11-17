@@ -1,0 +1,29 @@
+# Reply handler that echoes payloads and tags headers
+REPLY nats://localhost:4222/lab.echo
+
+$msg.data
+
+###
+
+# Reply handler that renders a greeting from JSON
+REPLY nats://localhost:4222/lab.greet
+Trace-Id: randomId()
+Responder-Id: vscode-nats
+
+Hello, $json.name!
+
+###
+
+# Request with literal payloads
+REQUEST nats://localhost:4222/lab.echo
+
+"Hello World!"
+
+###
+
+REQUEST nats://localhost:4222/lab.greet
+Trace-Id: randomId()
+
+{
+  "name": "Alice"
+}

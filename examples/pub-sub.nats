@@ -1,0 +1,25 @@
+# Listen for metrics events
+SUBSCRIBE nats://localhost:4222/lab.metrics
+
+###
+
+# Listen for alerts
+SUBSCRIBE nats://localhost:4222/lab.alerts
+
+###
+
+# Publish a metrics sample
+PUBLISH nats://localhost:4222/lab.metrics
+Trace-Id: randomId()
+
+{
+  "type": "cpu",
+  "value": 0.9
+}
+
+###
+
+# Publish an alert
+PUBLISH nats://localhost:4222/lab.alerts
+
+"Threshold exceeded"
