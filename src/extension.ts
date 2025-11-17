@@ -1,26 +1,363 @@
-// The module 'vscode' contains the VS Code extensibility API
-// Import the module and reference it with the alias vscode in your code below
-import * as vscode from 'vscode';
+import * as vscode from "vscode";
+import {
+  parseNatsDocument,
+  findActionNearestLine,
+} from "@/core/nats-document-parser";
+import { NatsActionType, NatsAction } from "@/core/nats-actions";
+import {
+  registerCodeLensProvider,
+  buildKey,
+} from "@/features/code-lens/nats-code-lens-provider";
+import { registerJetStreamPullCommand } from "@/features/jetstream/register-jetstream-pull-command";
+import { registerFormattingProvider } from "@/features/formatting/nats-formatting-provider";
+import { createDefaultConnector } from "@/services/nats-connector";
+import { NatsSession } from "@/services/nats-session";
+import { OutputChannelRegistry } from "@/services/output-channel-registry";
+import { createVsCodeChannelFactory } from "@/platform/vscode/output-channel-factory";
+import { StatusBarController } from "@/platform/vscode/status-bar-controller";
+import { registerVariableTree } from "@/platform/vscode/variable-tree-provider";
+import { VariableStore } from "@/services/variable-store";
+import { appendLogBlock } from "@/services/log-sink";
 
-// This method is called when your extension is activated
-// Your extension is activated the very first time the command is executed
-export function activate(context: vscode.ExtensionContext) {
+let session: NatsSession;
+let channelRegistry: OutputChannelRegistry;
+let statusBar: StatusBarController;
+let codeLensProvider: ReturnType<typeof registerCodeLensProvider>;
+let variableStore: VariableStore;
 
-	// Use the console to output diagnostic information (console.log) and errors (console.error)
-	// This line of code will only be executed once when your extension is activated
-	console.log('Congratulations, your extension "nats-client" is now active!');
+export async function activate(context: vscode.ExtensionContext) {
+  session = new NatsSession(createDefaultConnector());
+  channelRegistry = new OutputChannelRegistry(
+    createVsCodeChannelFactory(),
+    "NATS",
+  );
+  statusBar = new StatusBarController();
+  codeLensProvider = registerCodeLensProvider(session, context);
+  variableStore = new VariableStore(context.workspaceState);
+  registerVariableTree(context, variableStore);
+  registerFormattingProvider(context);
 
-	// The command has been defined in the package.json file
-	// Now provide the implementation of the command with registerCommand
-	// The commandId parameter must match the command field in package.json
-	const disposable = vscode.commands.registerCommand('nats-client.helloWorld', () => {
-		// The code you place here will be executed every time your command is executed
-		// Display a message box to the user
-		vscode.window.showInformationMessage('Hello World from NATS Client!');
-	});
+  context.subscriptions.push(
+    new vscode.Disposable(() => channelRegistry.disposeAll()),
+    statusBar,
+  );
 
-	context.subscriptions.push(disposable);
+  const settings = readSettings();
+
+  const updateConnections = () =>
+    statusBar.updateConnectionCount(session.connectionCount());
+
+  registerCommand(context, "nats.showOutput", () => {
+    channelRegistry.main().show(true);
+  });
+
+  registerCommand(context, "nats.connections.menu", async () => {
+    const connections = session.listConnections();
+    const items: vscode.QuickPickItem[] = [
+      { label: "$(sync) Reset all connections", description: "reset" },
+      { label: "$(info) View details", description: "view" },
+    ];
+    const selection = await vscode.window.showQuickPick(items, {
+      placeHolder: "Manage NATS connections",
+    });
+    if (!selection) {
+      return;
+    }
+    if (selection.description === "reset") {
+      await session.reset();
+      channelRegistry.disposeAll();
+      codeLensProvider.refresh();
+      updateConnections();
+      vscode.window.showInformationMessage(
+        "All NATS connections have been reset",
+      );
+    } else if (selection.description === "view") {
+      if (connections.length === 0) {
+        vscode.window.showInformationMessage("No active connections");
+        return;
+      }
+      const details = connections.map((conn) => `${conn.server}`).join("\n");
+      vscode.window.showInformationMessage(`Active connections:\n${details}`, {
+        modal: true,
+      });
+    }
+  });
+
+  registerCommand(context, "nats.connections.reset", async () => {
+    await session.reset();
+    channelRegistry.disposeAll();
+    codeLensProvider.refresh();
+    updateConnections();
+    vscode.window.showInformationMessage(
+      "All NATS connections have been reset",
+    );
+  });
+
+  registerCommand(
+    context,
+    "nats.startSubscription",
+    async (filePath: string, line: number) => {
+      const action = await resolveAction(filePath, line, "subscribe");
+      if (!action) {
+        vscode.window.showErrorMessage(
+          "SUBSCRIBE action not found on this line",
+        );
+        return;
+      }
+      const server = resolveServer(action.server);
+      if (!server) {
+        vscode.window.showErrorMessage(
+          "SUBSCRIBE block must specify a server (inline or via NATS-Server header)",
+        );
+        return;
+      }
+      const subject = variableStore.resolveText(action.subject);
+      const key = buildKey(filePath, line);
+      const channel = channelRegistry.acquire(subject, key);
+      try {
+        await session.startSubscription(server, subject, channel, key);
+        channel.show(true);
+        vscode.window.showInformationMessage(
+          `Subscription started on ${subject}`,
+        );
+        updateConnections();
+      } catch (error) {
+        channelRegistry.release(key);
+        throw error;
+      }
+      codeLensProvider.refresh();
+    },
+  );
+
+  registerCommand(
+    context,
+    "nats.stopSubscription",
+    async (filePath: string, line: number) => {
+      const key = buildKey(filePath, line);
+      session.stopSubscription(key);
+      channelRegistry.release(key);
+      vscode.window.showInformationMessage("Subscription stopped");
+      codeLensProvider.refresh();
+    },
+  );
+
+  registerCommand(
+    context,
+    "nats.sendRequest",
+    async (filePath: string, line: number) => {
+      const action = await resolveAction(filePath, line, "request");
+      if (!action) {
+        vscode.window.showErrorMessage("REQUEST action not found on this line");
+        return;
+      }
+      const server = resolveServer(action.server);
+      if (!server) {
+        vscode.window.showErrorMessage(
+          "REQUEST block must specify a server (inline or via NATS-Server header)",
+        );
+        return;
+      }
+      const subject = variableStore.resolveText(action.subject);
+      const payload = variableStore.resolveOptional(action.data) ?? "";
+      const headers = variableStore.resolveRecord(action.headers);
+      const result = await session.sendRequest(
+        server,
+        subject,
+        payload,
+        { timeoutMs: action.timeoutMs ?? settings.requestTimeoutMs },
+        headers,
+      );
+      const mainChannel = channelRegistry.main();
+      appendLogBlock(mainChannel, result);
+      if (settings.autoRevealOutput) {
+        mainChannel.show(true);
+      }
+      updateConnections();
+    },
+  );
+
+  registerCommand(
+    context,
+    "nats.publish",
+    async (filePath: string, line: number) => {
+      const action = await resolveAction(filePath, line, "publish");
+      if (!action) {
+        vscode.window.showErrorMessage("PUBLISH action not found on this line");
+        return;
+      }
+      const server = resolveServer(action.server);
+      if (!server) {
+        vscode.window.showErrorMessage(
+          "PUBLISH block must specify a server (inline or via NATS-Server header)",
+        );
+        return;
+      }
+      const subject = variableStore.resolveText(action.subject);
+      const payload = variableStore.resolveOptional(action.data) ?? "";
+      const headers = variableStore.resolveRecord(action.headers);
+      const result = await session.publish(server, subject, payload, headers);
+      const mainChannel = channelRegistry.main();
+      appendLogBlock(mainChannel, result);
+      if (settings.autoRevealOutput) {
+        mainChannel.show(true);
+      }
+      vscode.window.showInformationMessage(`Published to ${subject}`);
+      updateConnections();
+    },
+  );
+
+  registerCommand(
+    context,
+    "nats.startReplyHandler",
+    async (filePath: string, line: number) => {
+      const action = await resolveAction(filePath, line, "reply");
+      if (!action) {
+        vscode.window.showErrorMessage("REPLY action not found on this line");
+        return;
+      }
+      if (!action.template && !action.data) {
+        vscode.window.showErrorMessage(
+          "Reply handler requires a template or payload",
+        );
+        return;
+      }
+      const server = resolveServer(action.server);
+      if (!server) {
+        vscode.window.showErrorMessage(
+          "REPLY block must specify a server (inline or via NATS-Server header)",
+        );
+        return;
+      }
+      const key = buildKey(filePath, line);
+      const subject = variableStore.resolveText(action.subject);
+      const headers = variableStore.resolveRecord(action.headers);
+      const channel = channelRegistry.acquire(`Reply:${subject}`, key);
+      try {
+        const template = variableStore.resolveOptional(action.template);
+        const payload = variableStore.resolveOptional(action.data);
+        await session.startReplyHandler(
+          server,
+          subject,
+          template,
+          payload,
+          channel,
+          key,
+          headers,
+        );
+        channel.show(true);
+        vscode.window.showInformationMessage(
+          `Reply handler started for ${subject}`,
+        );
+        updateConnections();
+      } catch (error) {
+        channelRegistry.release(key);
+        throw error;
+      }
+      codeLensProvider.refresh();
+    },
+  );
+
+  registerCommand(
+    context,
+    "nats.stopReplyHandler",
+    (filePath: string, line: number) => {
+      const key = buildKey(filePath, line);
+      session.stopReplyHandler(key);
+      channelRegistry.release(key);
+      vscode.window.showInformationMessage("Reply handler stopped");
+      codeLensProvider.refresh();
+    },
+  );
+
+  registerJetStreamPullCommand({
+    session,
+    channelRegistry,
+    defaultTimeoutMs: settings.requestTimeoutMs,
+    resolveAction,
+    resolveText: (value) => variableStore.resolveText(value),
+    resolveServer,
+    register: (command, callback) =>
+      registerCommand(context, command, async (...args: any[]) => {
+        await Promise.resolve(callback(...args));
+        updateConnections();
+      }),
+  });
 }
 
-// This method is called when your extension is deactivated
-export function deactivate() {}
+export async function deactivate(): Promise<void> {
+  if (session) {
+    await session.reset();
+  }
+  channelRegistry?.disposeAll();
+  statusBar?.dispose();
+}
+
+function registerCommand(
+  context: vscode.ExtensionContext,
+  command: string,
+  callback: (...args: any[]) => Thenable<void> | void,
+): void {
+  const disposable = vscode.commands.registerCommand(
+    command,
+    async (...args: any[]) => {
+      try {
+        await Promise.resolve(callback(...args));
+      } catch (error) {
+        reportError(error, `Command ${command} failed`);
+      }
+    },
+  );
+  context.subscriptions.push(disposable);
+}
+
+async function resolveAction(
+  filePath: string,
+  line: number,
+  type: NatsActionType,
+): Promise<NatsAction | undefined> {
+  const document = await vscode.workspace.openTextDocument(
+    vscode.Uri.file(filePath),
+  );
+  const actions = parseNatsDocument(document.getText());
+  return findActionNearestLine(actions, line - 1, type);
+}
+
+function reportError(error: unknown, message: string): void {
+  const errorMsg = error instanceof Error ? error.message : String(error);
+  const stack = error instanceof Error ? error.stack : undefined;
+
+  vscode.window.showErrorMessage(`${message}: ${errorMsg}`);
+
+  const channel = channelRegistry.main();
+  const meta = { timestamp: new Date().toISOString() };
+  const items = [
+    { title: "ERROR", body: message },
+    { title: "Message", body: errorMsg },
+  ];
+  if (stack) {
+    items.push({ title: "Stack trace", body: stack });
+  }
+  appendLogBlock(channel, { meta, items }, "");
+  console.error(message, error);
+}
+
+interface ExtensionSettings {
+  requestTimeoutMs: number;
+  autoRevealOutput: boolean;
+}
+
+function readSettings(): ExtensionSettings {
+  const config = vscode.workspace.getConfiguration("natsClient");
+  return {
+    requestTimeoutMs: config.get("requestTimeoutMs", 15000),
+    autoRevealOutput: config.get("autoRevealOutput", false),
+  };
+}
+
+function resolveServer(value: string | undefined): string | undefined {
+  if (!value) {
+    return undefined;
+  }
+  const resolved = variableStore.resolveText(value);
+  return resolved.trim().length > 0 ? resolved : undefined;
+}
