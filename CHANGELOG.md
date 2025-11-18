@@ -6,6 +6,12 @@ Check [Keep a Changelog](http://keepachangelog.com/) for recommendations on how 
 
 This project is licensed under the MIT License.
 
+## [0.0.2] - 2025-11-19
+
+### Features
+
+- View active NATS subscriptions and reply handlers from the Command Palette; take actions directly (unsubscribe, stop handler, reveal output).
+
 ## [0.0.1] - 2025-11-17
 
 ### Added
