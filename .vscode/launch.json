@@ -14,7 +14,7 @@
         "--disable-extensions"
       ],
       "outFiles": ["${workspaceFolder}/out/**/*.js"],
-      "preLaunchTask": "${defaultBuildTask}",
+      "preLaunchTask": "bun: watch",
       "sourceMaps": true
     }
   ]
