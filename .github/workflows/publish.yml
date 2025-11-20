@@ -1,4 +1,4 @@
-name: Publish to VS Code Marketplace
+name: Publish to VS Code Marketplaces
 
 on:
   workflow_run:
@@ -15,7 +15,7 @@ permissions:
   packages: write
 
 jobs:
-  publish:
+  vsce:
     if: ${{ github.event.workflow_run.conclusion == 'success' }}
     runs-on: ubuntu-latest
     environment:
@@ -23,27 +23,22 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-
-      - name: Setup Bun
-        uses: oven-sh/setup-bun@v1
-        with:
-          bun-version: latest
-
-      - name: Install dependencies
-        run: bun install --frozen-lockfile
-
-      - name: Build extension
-        run: bun run vscode:prepublish
-
-      - name: Create VSIX package
-        run: bun run vscode:package
-
+      - uses: ./.github/actions/publish-common
       - name: Publish to Visual Studio Marketplace
         if: ${{ env.VSCE_PAT != '' }}
         env:
           VSCE_PAT: ${{ secrets.VSCE_PAT }}
         run: bun run vscode:publish -- --pat "${{ env.VSCE_PAT }}"
 
+  ovsx:
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+    runs-on: ubuntu-latest
+    environment:
+      name: production
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - uses: ./.github/actions/publish-common
       - name: Publish to Open VSX Registry
         if: ${{ env.OVSX_PAT != '' }}
         env:
