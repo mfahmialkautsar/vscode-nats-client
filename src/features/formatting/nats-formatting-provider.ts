@@ -92,6 +92,29 @@ export class NatsFormatter {
       .map((line) => line.text.replace(/\s+$/, ""));
     const verb = this.extractVerb(lines[requestIndex].text);
     const requestLine = this.formatRequestLine(lines[requestIndex].text);
+
+    // Determine if we need to preserve leading blank lines before body
+    let preserveLeadingBlankCount = 0;
+    let scanIndex = requestIndex + 1;
+    while (
+      scanIndex < lines.length &&
+      lines[scanIndex].text.trim().length === 0
+    ) {
+      preserveLeadingBlankCount += 1;
+      scanIndex += 1;
+    }
+    // const firstNonEmpty =
+    //   scanIndex < lines.length ? lines[scanIndex].text.trim() : "";
+    // const followedByHeader =
+    //   firstNonEmpty.length > 0 &&
+    //   (COMMENT_PATTERN.test(firstNonEmpty) ||
+    //     HEADER_KEY_PATTERN.test(firstNonEmpty.split(":", 1)[0] ?? ""));
+    // if (!followedByHeader) {
+    //   // We'll preserve blank lines for non-header body cases. To ensure the
+    //   // header-extraction logic doesn't swallow them, call extractHeaders as
+    //   // normal and we'll re-add blanks afterward if necessary.
+    // }
+
     const { headerLines, nextIndex } = this.extractHeaders(
       lines,
       requestIndex + 1,
@@ -113,7 +136,14 @@ export class NatsFormatter {
     for (const header of headerLines) {
       output.push(header);
     }
-    if (
+    if (preserveLeadingBlankCount > 0 && headerLines.length === 0) {
+      // Re-attach the intentionally placed blank lines. If the command also
+      // requires padding (e.g., REPLY/PUBLISH) we should not add a second blank
+      // line — preserving the original count is preferred.
+      for (let i = 0; i < preserveLeadingBlankCount; i++) {
+        output.push("");
+      }
+    } else if (
       bodyLines.length > 0 &&
       (headerLines.length > 0 || this.shouldPadHeaderlessBody(verb))
     ) {

@@ -43,6 +43,32 @@ describe("NatsFormatter", () => {
     expect(formatted).toBe('PUBLISH lab.metrics\n\n{\n  "value": 1\n}\n');
   });
 
+  it("preserves blank line under command when not followed by headers", () => {
+    const formatted = formatter.format('REQUEST demo.q\n\n{"value":1}\n');
+    expect(formatted).toBe('REQUEST demo.q\n\n{\n  "value": 1\n}\n');
+  });
+
+  it("does not preserve blank line under command when followed by headers", () => {
+    const text = [
+      "REQUEST demo.q",
+      "",
+      "Trace-Id: abc",
+      "",
+      '{"value":1}',
+      "",
+    ].join("\n");
+    const expected = [
+      "REQUEST demo.q",
+      "Trace-Id: abc",
+      "",
+      "{",
+      '  "value": 1',
+      "}",
+      "",
+    ].join("\n");
+    expect(formatter.format(text)).toBe(expected);
+  });
+
   it("normalizes verbs, preserves comments, and spaces delimiters consistently", () => {
     const text = [
       "// note",
