@@ -6,6 +6,24 @@ Check [Keep a Changelog](http://keepachangelog.com/) for recommendations on how 
 
 This project is licensed under the MIT License.
 
+## [0.0.3] - 2025-11-20
+
+### Added
+
+- Manage NATS connections, subscriptions, and reply handlers directly from the Command Palette and the connection UI: list active items, stop or reconnect them, and quickly reveal output channels.
+- Progress indicators for publish and request operations so you can see live status for long-running actions.
+- Commands to check connection health and flush in-flight messages from the Command Palette.
+- Now available on the Open VSX Registry.
+
+### Improved
+
+- Increased session stability: transient network interruptions are handled more smoothly and subscriptions are preserved where possible, reducing message loss and reconnect interruptions.
+- Formatting and parsing improvements for `.nats` documents: formatting now preserves delimiter text and the parser recognizes delimiter lines with trailing text for more predictable edits.
+
+### Changed
+
+- Minimum supported VS Code version updated to 1.93.0 and Node.js version to 20.0.0.
+
 ## [0.0.2] - 2025-11-19
 
 ### Features
